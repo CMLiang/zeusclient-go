@@ -1,7 +1,15 @@
-# zeusclient-go
-Zeus client Go客户端
+package controllers
 
-```
+import (
+	"github.com/CMLiang/zeusclient-go/utils"
+	"github.com/astaxie/beego"
+)
+
+// TokenClaimsControllers operations for TokenClaims
+type BusinessControllers struct {
+	BaseController
+}
+
 /*
 	下面是业务Controllers获取JWTClaims的示例
 	1、调用BaseController的ParseClaims()方法，返回的是map[string]interface{}或nil
@@ -35,4 +43,3 @@ func (c *BusinessControllers) CheckPerm() {
 		c.jsonResult(400, "检测权限不通过，没有权限！", nil)
 	}
 }
-```

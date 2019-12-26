@@ -4,37 +4,34 @@ import (
 	"crypto/tls"
 	"log"
 
+	"github.com/astaxie/beego"
 	"github.com/astaxie/beego/httplib"
 )
 
-const (
-	CENTER_SERVICE string = "http://api.admin.bullteam.cn"
-)
-
 var (
-	accessToken, domain string
+	CENTER_SERVICE string = beego.AppConfig.String("center_service")
+	DOMAIN         string = beego.AppConfig.String("domain")
 )
 
 type PermCenter struct {
 	AccessToken string `json:"access_token"`
-	Domain      string `json:"domain"`
 }
 
-func NewPermCenter(accessToken, domain string) *PermCenter {
+func NewPermCenter(accessToken string) *PermCenter {
 	pc := new(PermCenter)
 	pc.AccessToken = accessToken
-	pc.Domain = domain
 	return pc
 }
 
 /**
  * 检查权限
  */
-func (pc *PermCenter) checkPerm(perm string) bool {
+func (pc *PermCenter) CheckPerm(perm string) bool {
 	req := httplib.Post(CENTER_SERVICE + "/user/perm/check")
 	req.SetTLSClientConfig(&tls.Config{InsecureSkipVerify: true})
-	req.Header("Authorization", "Bearer"+pc.AccessToken)
+	req.Header("Authorization", "Bearer "+pc.AccessToken)
 	req.Param("perm", perm)
+	req.Param("domain", DOMAIN)
 	result := make(map[string]interface{})
 	err := req.ToJSON(&result)
 	if err != nil {

@@ -1,22 +1,39 @@
 package controllers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"os"
 	"strings"
 
 	"github.com/astaxie/beego"
+	"github.com/astaxie/beego/context"
 	"github.com/dgrijalva/jwt-go"
 )
 
-const (
-	JWT_PUBLIC_KEY string = "-----BEGIN PUBLIC KEY-----\n" +
-		"MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC/TYKuXsgYdoICfEZOiy1L12Cb\n" +
-		"yPdudhrCjrjwVcIrhGNn6Udq/SY5rh0ixm09I2tXPWLYuA1R55kyeo5RPFX+FrD+\n" +
-		"mQwfJkV/QfhaPsNjU4nCEHFMtrsYCcLYJs9uX0tJdAtE6sg/VSulg1aMqCNWvtVt\n" +
-		"jrrVXSbu4zbyWzVkxQIDAQAB\n" +
-		"-----END PUBLIC KEY-----"
-)
+var JWT_PUBLIC_KEY []byte
+
+func init() {
+	f, err := os.Open("keys/jwt_public_key.pem")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	fd, err := ioutil.ReadAll(f)
+	if err != nil {
+		panic(err)
+	}
+	JWT_PUBLIC_KEY = fd
+}
+
+// Ignored FilterToken
+var ignoredTokenRouter = map[string]bool{
+	"get@/demo/:id": true,
+}
 
 type BaseController struct {
 	beego.Controller
@@ -59,17 +76,63 @@ func (c *BaseController) jsonResultByPage(code int, msg string, data interface{}
 	c.StopRun()
 }
 
-// ParseToken parse JWT token in http header.
-func (base *BaseController) ParseToken() (t *jwt.Token, e error) {
-	authString := base.Ctx.Input.Header("Authorization")
+func (base *BaseController) GetAccessToken() string {
+	actData := base.Ctx.Input.GetData("JWTToken")
+	act, ok := actData.(string)
+	if ok {
+		return act
+	}
+	return ""
+}
+
+// Parse JWTClaims in Ctx.Data["JWTClaims"]
+func (base *BaseController) ParseClaims() map[string]interface{} {
+	cl := base.Ctx.Input.GetData("JWTClaims")
+	if cl != nil {
+		clmap, ok := cl.(map[string]interface{})
+		if ok {
+			return clmap
+		}
+		return nil
+	}
+	return nil
+}
+
+// Recover Route
+func RecoverRoute(ctx *context.Context) string {
+	route := strings.Split(ctx.Request.URL.RequestURI(), "?")[0]
+	// 将路径中的参数值替换为参数名
+	for k, v := range ctx.Input.Params() {
+		// 如果参数是 :splat等预定义的，则跳过
+		if k == ":splat" || k == ":path" || k == ":ext" {
+			continue
+		}
+		route = strings.Replace(route, "/"+v, "/"+k, 1)
+	}
+	// 路径格式均为 请求类型@路径
+	route = strings.ToLower(ctx.Request.Method) + "@" + route
+	return route
+}
+
+// 路由拦截器的Filter
+var FilterToken = func(ctx *context.Context) {
+	// 路径格式均为 请求类型@路径
+	route := RecoverRoute(ctx)
+	// 直接通过map查询是否忽略
+	if _, ok := ignoredTokenRouter[route]; ok {
+		return
+	}
+	authString := ctx.Input.Header("Authorization")
 	beego.Debug("AuthString:", authString)
 
 	kv := strings.Split(authString, " ")
 	if len(kv) != 2 || kv[0] != "Bearer" {
-		beego.Error("AuthString invalid:", authString)
-		return nil, errors.New("AuthString invalid:" + authString)
+		beego.Error("Authorization格式不对或Token为空！")
+		http.Error(ctx.ResponseWriter, "Authorization格式不对或Token为空！", http.StatusUnauthorized)
+		return
 	}
 	tokenString := kv[1]
+	ctx.Input.SetData("JWTToken", tokenString)
 
 	// Parse token
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
@@ -85,40 +148,51 @@ func (base *BaseController) ParseToken() (t *jwt.Token, e error) {
 		//  return token, errors.New("Invalid audience.")
 		//}
 		// 必要的验证 'iss' claim
-		// iss := "https://atomintl.auth0.com/"
-		// checkIss := token.Claims.(jwt.MapClaims).VerifyIssuer(iss, false)
-		// if !checkIss {
-		// 	return token, errors.New("Invalid issuer.")
-		// }
+		iss := "https://atomintl.auth0.com/"
+		checkIss := token.Claims.(jwt.MapClaims).VerifyIssuer(iss, false)
+		if !checkIss {
+			return token, errors.New("Invalid issuer.")
+		}
 
-		k5c := JWT_PUBLIC_KEY
-		result, _ := jwt.ParseRSAPublicKeyFromPEM([]byte(k5c))
+		result, _ := jwt.ParseRSAPublicKeyFromPEM(JWT_PUBLIC_KEY)
 		//result := []byte(cert) // 不是正确的 PUBKEY 格式 都会 报  key is of invalid type
 		return result, nil
 	})
 	if err != nil {
-		beego.Error("Parse token:", err)
+		beego.Error("Parse token error:", err)
 		if ve, ok := err.(*jwt.ValidationError); ok {
 			if ve.Errors&jwt.ValidationErrorMalformed != 0 {
 				// That's not even a token
-				return nil, errors.New("ValidationErrorMalformed")
+				http.Error(ctx.ResponseWriter, "Token 格式有误！", http.StatusUnauthorized)
+				return
 			} else if ve.Errors&(jwt.ValidationErrorExpired|jwt.ValidationErrorNotValidYet) != 0 {
 				// Token is either expired or not active yet
-				return nil, errors.New("ValidationErrorNotValidYet")
+				http.Error(ctx.ResponseWriter, "Token 已过期！", http.StatusUnauthorized)
+				return
 			} else {
 				// Couldn't handle this token
-				return nil, errors.New("ValidationErrorOther")
+				http.Error(ctx.ResponseWriter, "验证Token的过程中发生其他错误！", http.StatusUnauthorized)
+				return
 			}
 		} else {
 			// Couldn't handle this token
-			return nil, errors.New("ValidationError")
+			http.Error(ctx.ResponseWriter, "无法处理此Token！", http.StatusUnauthorized)
+			return
 		}
 	}
 	if !token.Valid {
 		beego.Error("Token invalid:", tokenString)
-		return nil, errors.New("Token invalid:" + tokenString)
+		http.Error(ctx.ResponseWriter, "Token 不合法:"+tokenString, http.StatusUnauthorized)
+		return
 	}
 	beego.Debug("Token:", token)
-
-	return token, nil
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		beego.Debug("转换为jwt.MapClaims失败")
+		return
+	}
+	var claimsMIF = make(map[string]interface{})
+	jsonM, _ := json.Marshal(&claims)
+	json.Unmarshal(jsonM, &claimsMIF)
+	ctx.Input.SetData("JWTClaims", claimsMIF)
 }
